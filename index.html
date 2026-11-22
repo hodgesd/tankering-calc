@@ -171,10 +171,15 @@ function learnBias(store, plan) {
   const hours = hoursOf(plan.time);
   if (!(plan.planTrip > 0 && plan.planTOW > 0 && hours > 0)) return store;
   const key = routeKey(plan.from, plan.to), old = store[key] || [];
-  // The same plan read twice is one measurement.
-  if (old.some(s => s.trip === plan.planTrip && s.tow === plan.planTOW)) return store;
   const factor = (plan.planTrip - weightEffect(hours, plan.planTOW, REF_TOW)) / refBurn(hours);
-  return { ...store, [key]: [...old, { trip: plan.planTrip, tow: plan.planTOW, hours, factor }].slice(-BIAS_KEEP) };
+  // A factor this far from 1 is a misread or mistyped figure, not weather,
+  // and would skew the route for its next five plans.
+  if (factor < 0.7 || factor > 1.4) return store;
+  // The same plan read twice is one measurement; read again with a corrected
+  // flight time, it replaces the earlier sample where it stands.
+  const sample = { trip: plan.planTrip, tow: plan.planTOW, hours, factor };
+  const at = old.findIndex(s => s.trip === plan.planTrip && s.tow === plan.planTOW);
+  return { ...store, [key]: at >= 0 ? old.map((s, j) => j === at ? sample : s) : [...old, sample].slice(-BIAS_KEEP) };
 }
 
 function biasFor(store, from, to) {
@@ -310,14 +315,17 @@ function parsePlan(text) {
   const route = t.match(/FLIGHT\s*PLAN\s+\S+\s+([A-Z0-9]{3,4})\s+T[O0]\s+([A-Z0-9]{3,4})\b/);
   const trip = t.match(/TRIP\s+FUEL\s+[A-Z0-9]{3,4}\s+(\d{3,5})\s+(\d{1,2})[:;.](\d{2})/);
   if (!route || !trip) return null;
-  const get = re => { const m = t.match(re); return m ? +m[1] : 0; };
+  const get = re => { const m = t.match(re); return m ? +m[1] : null; };
   const bow = get(/\bBOW\s+(\d{5})/), payload = get(/PAYLD\s+(\d{1,5})/), toFuel = get(/T\/?[O0]\s*FUEL\s+(\d{3,5})/);
-  return {
+  const plan = {
     from: route[1], to: route[2], time: `${+trip[2]}:${trip[3]}`,
     planTrip: +trip[1],
-    planTOW: get(/T\/?[O0]\s*WGT\s+(\d{5,6})/) || (bow && toFuel ? bow + payload + toFuel : 0),
+    planTOW: get(/T\/?[O0]\s*WGT\s+(\d{5,6})/) ?? (bow != null && toFuel != null ? bow + (payload ?? 0) + toFuel : null),
     payload, alt: get(/ALTERNATE\s+[A-Z0-9]{3,4}\s+(\d{1,5})/),
   };
+  // A figure not found is left out, so it neither overwrites what the leg has
+  // nor reads as zero. A real 0, such as no payload, is kept.
+  return Object.fromEntries(Object.entries(plan).filter(([, v]) => v != null));
 }
 
 // Decide what a pasted or OCR'd document is.
@@ -357,7 +365,8 @@ const tripName = legs => legs.length ? [...legs.map(l => airportKey(l.from)), ai
 
 // Fold one document into the list of legs. An itinerary sets the legs and
 // their order, keeping what plans already filled in. A plan fills the leg with
-// the same airports; failing that, the one leg still without a plan that
+// the same airports (on a route flown twice: the leg it already filled if read
+// again, else the first such leg without a plan); failing that, the one leg still without a plan that
 // shares an airport with it (OCR misread the other), taking the plan's idents;
 // failing that, it is added as a new leg.
 function mergeDocument(legs, doc) {
@@ -368,7 +377,9 @@ function mergeDocument(legs, doc) {
     });
   }
   const p = doc.plan;
-  let i = legs.findIndex(l => sameLeg(l, p));
+  const exact = legs.flatMap((l, j) => sameLeg(l, p) ? [j] : []);
+  let i = exact.find(j => +legs[j].planTrip === p.planTrip && (+legs[j].planTOW || 0) === (p.planTOW || 0))
+    ?? exact.find(j => !(legs[j].planTrip > 0)) ?? (exact.length ? exact[0] : -1);
   if (i < 0) {
     const loose = legs.flatMap((l, j) => !(l.planTrip > 0) &&
       (airportKey(l.from) === airportKey(p.from) || airportKey(l.to) === airportKey(p.to)) ? [j] : []);
@@ -436,7 +447,7 @@ function withDefaults(leg) {
   const known = state.airports[airportKey(leg.from)] || {};
   return { from: '', to: '', time: '', planTrip: '', planTOW: '', payload: 1150, alt: 1000,
            limTO: state.ac.mtow, limLdg: state.ac.mlw, price: '', fee: 0, waiver: 0, feeAfter: 0, ...known,
-           ...Object.fromEntries(Object.entries(leg).filter(([, v]) => v !== 0 && v !== '' && v != null)) };
+           ...Object.fromEntries(Object.entries(leg).filter(([, v]) => v !== '' && v != null)) };
 }
 
 function field(obj, key, label) {
@@ -584,7 +595,7 @@ function describeDoc(doc) {
   const p = doc.plan;
   return `Flight plan ${p.from} to ${p.to}: trip fuel ${int(p.planTrip)} lb, ${p.time}` +
     (p.planTOW ? `, T/O weight ${int(p.planTOW)} lb` : ', no T/O weight found') +
-    (p.payload ? `, payload ${int(p.payload)} lb` : '') + (p.alt ? `, alternate ${int(p.alt)} lb` : '');
+    (p.payload != null ? `, payload ${int(p.payload)} lb` : '') + (p.alt != null ? `, alternate ${int(p.alt)} lb` : '');
 }
 
 function addSource(text, ok, raw) {
@@ -604,14 +615,15 @@ function addSource(text, ok, raw) {
   return li;
 }
 
-// The first drop after opening the page starts a new trip; later drops add to it.
+// The first drop after opening the page starts a new trip; later drops add to
+// it, as do drops after loading a saved trip or a trip link.
 let newTrip = true;
 
 // Read a batch of dropped or pasted items: [{name, text}] or [{name, file}].
 // Itineraries are applied before plans so plans land on the right legs.
 async function readItems(items) {
-  if (newTrip || state.fromExample) { archive(); state.legs = []; state.fromExample = false; $('sources').replaceChildren(); }
-  newTrip = false;
+  const startNew = newTrip || state.fromExample;
+  if (startNew) $('sources').replaceChildren();
   const docs = [];
   for (const [n, item] of items.entries()) {
     let text = item.text;
@@ -624,6 +636,12 @@ async function readItems(items) {
     addSource(doc ? describeDoc(doc) : `${item.name}: no itinerary rows or flight plan found`, !!doc, text);
     if (doc) docs.push(doc);
   }
+  // Nothing readable: leave the trip on screen alone.
+  if (!docs.length) return;
+  // Checked again now: a batch dropped while this one was being read may
+  // already have started the new trip.
+  if (newTrip || state.fromExample) { archive(); state.legs = []; state.fromExample = false; }
+  newTrip = false;
   docs.sort((a, b) => (a.kind === 'plan') - (b.kind === 'plan'));
   for (const doc of docs) if (doc.kind === 'plan') state.bias = learnBias(state.bias, doc.plan);
   for (const doc of docs) state.legs = mergeDocument(state.legs, doc).map(withDefaults);
@@ -665,7 +683,7 @@ function loadTrip(packed) {
   if (t.fob != null) state.fob = t.fob;
   state.ac = { ...state.ac, ...t.ac };
   state.fromExample = false;
-  newTrip = true;
+  newTrip = false;
   $('sources').replaceChildren();
   renderInputs(); compute();
   return true;
@@ -799,7 +817,10 @@ function compute() {
   if (!best) return show('No legal fuel plan.', minFuel.why || 'Check the weights and fuel on board.');
 
   const saving = minFuel.ok ? minFuel.total - best.total : 0;
-  if (saving > 0.005) show(`Tanker: saves ${usd(saving)}`, describe(best), true);
+  // "Tanker" only when fuel is carried past a stop. Buying fee-cut gallons on
+  // the last leg can save money too, but that is not tankering.
+  const carried = best.rows.slice(0, -1).some((r, i) => r.landing > minFuel.rows[i].landing + 1);
+  if (saving > 0.005) show(`${carried ? 'Tanker' : 'Best plan'}: saves ${usd(saving)}`, describe(best), true);
   else show('Buy minimum fuel at each stop', describe(best));
   lastVerdict = $('verdict').textContent;
   lastPlan = { legs, best, minFuel };
