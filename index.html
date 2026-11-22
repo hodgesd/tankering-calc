@@ -1,0 +1,886 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>G600 Tankering</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --fg: var(--foreground, CanvasText);
+    --dim: var(--muted-foreground, color-mix(in srgb, CanvasText 60%, transparent));
+    --line: var(--border, color-mix(in srgb, CanvasText 16%, transparent));
+    --panel: var(--card, color-mix(in srgb, CanvasText 4%, transparent));
+    --good: var(--success, #1a8a3c);
+    --bad: var(--destructive, #c0392b);
+    --warn: var(--warning, #b7791f);
+    --r: var(--radius, 8px);
+  }
+  body { font: 15px/1.45 var(--font-sans, system-ui, sans-serif); color: var(--fg); background: Canvas; margin: 0 auto; max-width: 980px; padding: 8px 16px; }
+  h1 { font-size: 20px; margin: 8px 0 2px; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--dim); margin: 22px 0 8px; font-weight: 600; }
+  h3 { font-size: 12px; color: var(--dim); font-weight: 600; margin: 12px 0 6px; }
+  p.sub { color: var(--dim); margin: 0 0 12px; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: var(--r); padding: 16px; margin-bottom: 12px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(132px, 1fr)); gap: 10px 12px; }
+  label { display: block; font-size: 12px; color: var(--dim); }
+  input { display: block; width: 100%; box-sizing: border-box; margin-top: 3px; padding: 6px 8px; font: inherit; color: var(--fg);
+          background: transparent; border: 1px solid var(--line); border-radius: 6px; font-variant-numeric: tabular-nums; }
+  input.err { border-color: var(--bad); }
+  select { font: inherit; color: var(--fg); background: transparent; border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; max-width: 100%; }
+  [hidden] { display: none !important; }
+  .manual input { border-color: color-mix(in srgb, var(--fg) 40%, transparent); }
+  #drop { border: 2px dashed var(--line); border-radius: var(--r); padding: 22px 16px; text-align: center; color: var(--dim); cursor: pointer; }
+  #drop:focus, #drop.over { border-color: var(--fg); outline: none; color: var(--fg); }
+  #drop b { color: var(--fg); }
+  #sources { list-style: none; padding: 0; margin: 10px 0 0; font-size: 13px; }
+  #sources li { margin: 4px 0; }
+  #sources li.bad { color: var(--bad); }
+  #sources details { display: inline; }
+  #sources summary { display: inline; font-size: 12px; margin-left: 6px; }
+  #sources pre { font-size: 11px; white-space: pre-wrap; color: var(--dim); background: var(--panel); padding: 8px; border-radius: 6px; }
+  .leghead { display: flex; justify-content: space-between; align-items: center; gap: 8px; font-weight: 600; }
+  .legnote { color: var(--dim); font-weight: 400; font-size: 13px; }
+  button { font: inherit; color: inherit; background: transparent; border: 1px solid var(--line); border-radius: 6px; padding: 5px 12px; cursor: pointer; }
+  button:hover { background: var(--panel); }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: end; margin-top: 12px; }
+  #verdict { font-size: 18px; font-weight: 600; margin: 0 0 4px; }
+  #verdict.good { color: var(--good); }
+  #detail { color: var(--dim); margin: 0; }
+  .scroll { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; font-variant-numeric: tabular-nums; }
+  th, td { text-align: right; padding: 6px 6px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  th { font-size: 12px; font-weight: 600; color: var(--dim); }
+  th:first-child, td:first-child { text-align: left; }
+  tr.best td { font-weight: 600; }
+  tr.na td { color: var(--dim); }
+  .warn { color: var(--warn); margin: 8px 0 0; }
+  details summary { cursor: pointer; color: var(--dim); font-size: 13px; }
+  .panel > details { margin-top: 12px; }
+  .panel > details[open] summary { margin-bottom: 10px; }
+</style>
+</head>
+<body>
+<h1>G600 Tankering</h1>
+<p class="sub">Drop screenshots of the itinerary and the flight plans, enter fuel prices, and read off the ramp fuel for each leg.</p>
+
+<div class="panel">
+  <div id="drop" tabindex="0" role="button">
+    <b>Drop or paste screenshots here</b> (⌘V works anywhere on the page), or click to choose files.<br>
+    The itinerary rows and the top block of each flight plan. Pasted text works too.
+  </div>
+  <input id="files" type="file" accept="image/*,text/plain" multiple hidden>
+  <ul id="sources"></ul>
+  <div class="row">
+    <label style="width:170px">Initial fuel on board (lb)<input id="fob" inputmode="decimal"></label>
+    <button id="add">Add leg</button>
+    <button id="clear">New trip</button>
+    <button id="reset">Example</button>
+    <select id="recent" aria-label="Recent trips"></select>
+  </div>
+</div>
+
+<div id="legs"></div>
+
+<h2>Result</h2>
+<div class="panel">
+  <p id="verdict"></p>
+  <p id="detail"></p>
+  <div id="warnings"></div>
+  <div class="row">
+    <button id="copysum">Copy summary</button>
+    <button id="copylink">Copy link</button>
+  </div>
+</div>
+<div class="panel scroll"><table id="plan"></table></div>
+<div class="panel scroll"><table id="compare"></table></div>
+
+<details class="panel">
+  <summary id="learnedsum">What it has learned</summary>
+  <p class="sub">Every flight plan read, by OCR or typed in, measures how far the flight-time estimate is off on that route.
+    Legs without a plan use the correction for their route, or the average of all routes if it has never been planned.
+    Each route keeps its last five plans. Stored in this browser only.</p>
+  <div class="scroll"><table id="learned"></table></div>
+  <div class="row"><button id="forget">Forget all</button></div>
+</details>
+
+<details class="panel">
+  <summary>Aircraft and fuel policy</summary>
+  <div id="aircraft"></div>
+</details>
+
+<script id="core">
+// Tankering maths and document parsing. No DOM access here, so test.js can
+// run it under jsc.
+//
+// Trip fuel for a leg comes from its flight plan when one was read: the plan's
+// trip fuel, adjusted for the difference between the plan's takeoff weight
+// and the one being costed. Without a plan it is estimated from flight time:
+//   reference burn = climb and descent allowance + cruise flow * cruise hours
+// Either way, each extra pound of takeoff weight burns
+//   ALPHA * hours * (takeoff weight in 1,000 lb)^2 pounds.
+// The climb and descent allowance comes from the waypoint logs of two ARINC
+// plans for N75EM. CRUISE_FLOW is a least-squares fit to the eight ARINC trip
+// fuel figures in test.js (KSTL-KPSP and KSTL-KDJT round trips, 2:05 to 3:06).
+// Those figures scatter about 3% around the fit, 5% at worst, mostly because
+// the estimate does not know the direction of flight. ALPHA is fitted to
+// ARINC tankering results, not to the operating manual, whose break-even
+// table is more pessimistic than ARINC.
+const ALPHA = 3.95e-6;
+const REF_TOW = 66869;              // takeoff weight the reference burn applies to
+const CLIMB_DESCENT_FUEL = 2560;    // lb, climb to cruise plus descent
+const CLIMB_DESCENT_HOURS = 0.61;
+const CRUISE_FLOW = 3000;           // lb/hr at REF_TOW
+const EPS = 0.01;
+
+// Extra burn from taking off at `tow` instead of `from`, integrated so it holds
+// for large fuel differences.
+const weightEffect = (hours, tow, from) => ALPHA * hours * (tow ** 3 - from ** 3) / 3e6;
+
+const refBurn = hours => hours > CLIMB_DESCENT_HOURS
+  ? CLIMB_DESCENT_FUEL + CRUISE_FLOW * (hours - CLIMB_DESCENT_HOURS)
+  : CLIMB_DESCENT_FUEL * hours / CLIMB_DESCENT_HOURS;
+
+// Estimated trip fuel. `bias` scales the reference burn; it is learned from
+// flight plans on the same route (see learnBias).
+function tripFuel(hours, tow, bias = 1) {
+  return refBurn(hours) * bias + weightEffect(hours, tow, REF_TOW);
+}
+
+// Trip fuel for one leg at a takeoff weight: anchored to the flight plan when
+// there is one, else estimated with the leg's learned bias.
+function legBurn(leg, tow) {
+  return leg.planTrip > 0 && leg.planTOW > 0
+    ? leg.planTrip + weightEffect(leg.hours, tow, leg.planTOW)
+    : tripFuel(leg.hours, tow, leg.bias || 1);
+}
+
+const hoursOf = t => { const m = String(t).trim().match(/^(\d+):(\d{1,2})$/); return m ? +m[1] + m[2] / 60 : Number(t); };
+
+// ---- Learning from flight plans -------------------------------------------
+// Every plan read is a free measurement of how far the estimate is off on that
+// route: wind, cruise level and routing all show up in it. The bias is the
+// factor on the reference burn that makes the estimate reproduce the plan at
+// the plan's own takeoff weight. Each route keeps its last BIAS_KEEP plans so
+// the bias follows the seasons; a route never planned uses the average of all
+// plans. Store shape: { 'STL-PSP': [{ trip, tow, hours, factor }, ...] }.
+const BIAS_KEEP = 5;
+const routeKey = (from, to) => `${airportKey(from)}-${airportKey(to)}`;
+
+function learnBias(store, plan) {
+  const hours = hoursOf(plan.time);
+  if (!(plan.planTrip > 0 && plan.planTOW > 0 && hours > 0)) return store;
+  const key = routeKey(plan.from, plan.to), old = store[key] || [];
+  // The same plan read twice is one measurement.
+  if (old.some(s => s.trip === plan.planTrip && s.tow === plan.planTOW)) return store;
+  const factor = (plan.planTrip - weightEffect(hours, plan.planTOW, REF_TOW)) / refBurn(hours);
+  return { ...store, [key]: [...old, { trip: plan.planTrip, tow: plan.planTOW, hours, factor }].slice(-BIAS_KEEP) };
+}
+
+function biasFor(store, from, to) {
+  const mean = list => list.reduce((a, s) => a + s.factor, 0) / list.length;
+  const route = store[routeKey(from, to)];
+  if (route && route.length) return { factor: mean(route), n: route.length, scope: 'route' };
+  const all = Object.values(store).flat();
+  return all.length ? { factor: mean(all), n: all.length, scope: 'all' } : { factor: 1, n: 0, scope: 'none' };
+}
+
+function fixedPoint(fn) {
+  let x = 15000;
+  for (let i = 0; i < 60; i++) x = fn(x);
+  return x;
+}
+
+// Per-leg functions of ramp fuel.
+function buildLeg(leg, ac) {
+  const zfw = ac.bow + leg.payload;
+  const burnTO = to => legBurn(leg, zfw + to);
+  // Required landing fuel: alternate + final reserve + contingency, never under the floor.
+  const landMin = to => Math.max(leg.alt + ac.finalRes + ac.cont * burnTO(to), ac.minLanding);
+  const limits = [
+    ['fuel capacity', ac.capacity],
+    ['max ramp weight', ac.maxRamp - zfw],
+    ['takeoff weight limit', leg.limTO - zfw + ac.taxi],
+    ['landing weight limit', fixedPoint(to => leg.limLdg - zfw + burnTO(to)) + ac.taxi],
+  ].sort((a, b) => a[1] - b[1]);
+  return {
+    zfw,
+    burn: ramp => burnTO(ramp - ac.taxi),
+    minRamp: fixedPoint(to => burnTO(to) + landMin(to)) + ac.taxi,
+    maxRamp: limits[0][1],
+    limitedBy: limits[0][0],
+    // Ramp fuel needed to land with `arrive` pounds.
+    rampForArrival: arrive => fixedPoint(to => arrive + burnTO(to)) + ac.taxi,
+  };
+}
+
+// Cost one fuelling plan. modes[i] says what to do at the departure of leg i:
+//   'min'    buy just enough to stay legal until the next stop that sells fuel
+//   'none'   buy nothing
+//   'waiver' buy exactly the gallons that waive or discount the ramp fee
+//   'max'    fill to the leg's weight or capacity limit
+function evaluate(legs, models, modes, fob0, ac) {
+  const n = legs.length;
+  // Backward pass: ramp fuel each stop needs so later 'none'/'waiver' stops still work.
+  const need = [];
+  for (let i = n - 1; i >= 0; i--) {
+    need[i] = models[i].minRamp;
+    if (i < n - 1 && (modes[i + 1] === 'none' || modes[i + 1] === 'waiver')) {
+      const bought = modes[i + 1] === 'waiver' ? legs[i + 1].waiver * ac.density : 0;
+      const arrive = need[i + 1] - bought;
+      if (arrive > 0) need[i] = Math.max(need[i], models[i].rampForArrival(arrive));
+    }
+  }
+  const rows = [];
+  let fob = fob0, fuelCost = 0, fees = 0, lbsBought = 0;
+  for (let i = 0; i < n; i++) {
+    const L = legs[i], M = models[i];
+    const ramp = modes[i] === 'none' ? fob
+      : modes[i] === 'waiver' ? fob + L.waiver * ac.density
+      : modes[i] === 'max' ? M.maxRamp
+      : Math.max(fob, need[i]);
+    if (ramp < fob - EPS) return { ok: false, why: `${L.from}: arrives with more fuel than the leg allows` };
+    if (ramp < M.minRamp - EPS) return { ok: false, why: `${L.from}: not enough fuel for the leg` };
+    if (ramp > M.maxRamp + EPS) return { ok: false, why: `${L.from}: over ${M.limitedBy}` };
+    const lbs = Math.max(0, ramp - fob), gal = lbs / ac.density;
+    // Buying `waiver` gallons or more cuts the fee to `feeAfter`: 0 when the FBO
+    // waives it, more when it only discounts it (Signature). A fee with no
+    // gallon figure is always charged in full.
+    const fee = L.fee > 0 && L.waiver > 0 && gal >= L.waiver - 1e-6 ? Math.min(L.feeAfter || 0, L.fee) : L.fee;
+    const burn = M.burn(ramp);
+    const landing = ramp - ac.taxi - burn;
+    rows.push({ leg: L, ramp, lbs, gal, cost: gal * L.price, fee, burn, landing,
+                tow: M.zfw + ramp - ac.taxi, ldw: M.zfw + landing });
+    fuelCost += gal * L.price; fees += fee; lbsBought += lbs;
+    fob = landing;
+  }
+  return { ok: true, rows, fuelCost, fees, total: fuelCost + fees, lbsBought, modes };
+}
+
+// Try every combination of modes and keep the cheapest legal plan.
+function optimize(legs, fob0, ac) {
+  const models = legs.map(l => buildLeg(l, ac));
+  const stuck = models.findIndex(m => m.minRamp > m.maxRamp + EPS);
+  if (stuck >= 0) return { error: `${legs[stuck].from} to ${legs[stuck].to} cannot carry its required fuel: over ${models[stuck].limitedBy}.` };
+  const choices = legs.map(l => l.fee > 0 && l.waiver > 0 ? ['min', 'none', 'waiver', 'max'] : ['min', 'none', 'max']);
+  let best = null;
+  const walk = (i, modes) => {
+    if (i === legs.length) {
+      const r = evaluate(legs, models, modes, fob0, ac);
+      if (r.ok && (!best || r.total < best.total - 0.005 ||
+          (Math.abs(r.total - best.total) <= 0.005 && r.lbsBought < best.lbsBought - EPS))) best = r;
+      return;
+    }
+    for (const m of choices[i]) walk(i + 1, [...modes, m]);
+  };
+  walk(0, []);
+  const minFuel = evaluate(legs, models, legs.map(() => 'min'), fob0, ac);
+  const fullTanker = evaluate(legs, models, legs.map((_, i) => i ? 'none' : 'min'), fob0, ac);
+  return { best, minFuel, fullTanker, models };
+}
+
+// Pull legs out of trip-sheet text, typed, copied or read by OCR. Each leg is
+// a "STL ,PDK" pair followed by its times. The ETE is the starred time; when
+// OCR has garbled it, it is the gap between the depart and arrive Zulu times
+// in brackets; failing that, the third unbracketed time (depart, arrive, ETE).
+// OCR can turn a letter in an ident into a digit ("5TL"), so idents may hold
+// digits as long as they hold a letter too.
+function parseItinerary(text) {
+  const ID = '((?=[A-Z0-9]{0,3}[A-Z])[A-Z0-9]{3,4})';
+  let routes = [...text.matchAll(new RegExp(`\\b${ID}\\s*,\\s*${ID}\\b`, 'g'))];
+  if (!routes.length) routes = [...text.matchAll(/\b([A-Z]{3,4})\s*(?:-|–|→|->|>|\bto\b)\s*([A-Z]{3,4})\b/g)];
+  const fmt = min => `${Math.floor(min / 60)}:${String(min % 60).padStart(2, '0')}`;
+  return routes.map((m, i) => {
+    const rest = text.slice(m.index + m[0].length, i + 1 < routes.length ? routes[i + 1].index : text.length);
+    const all = [...rest.matchAll(/(\(\s*)?(\d{1,2}):([0-5]\d)(\s*\))?(\*)?/g)]
+      .map(t => ({ min: +t[2] * 60 + +t[3], zulu: !!(t[1] && t[4]), star: !!t[5] }));
+    const plain = all.filter(t => !t.zulu), zulu = all.filter(t => t.zulu);
+    const starred = plain.find(t => t.star);
+    const gap = zulu.length >= 2 ? (zulu[1].min - zulu[0].min + 1440) % 1440 : 0;
+    const ete = starred ? starred.min : gap || (plain.length ? plain[Math.min(2, plain.length - 1)].min : 0);
+    return { from: m[1], to: m[2], time: ete ? fmt(ete) : '' };
+  });
+}
+
+// Read the top block of an ARINC Direct flight plan. OCR reads "T/O" as "T/0"
+// and sometimes "TO" as "T0", so both are accepted. Returns null when the text
+// is not a flight plan.
+function parsePlan(text) {
+  const t = text.toUpperCase();
+  const route = t.match(/FLIGHT\s*PLAN\s+\S+\s+([A-Z0-9]{3,4})\s+T[O0]\s+([A-Z0-9]{3,4})\b/);
+  const trip = t.match(/TRIP\s+FUEL\s+[A-Z0-9]{3,4}\s+(\d{3,5})\s+(\d{1,2})[:;.](\d{2})/);
+  if (!route || !trip) return null;
+  const get = re => { const m = t.match(re); return m ? +m[1] : 0; };
+  const bow = get(/\bBOW\s+(\d{5})/), payload = get(/PAYLD\s+(\d{1,5})/), toFuel = get(/T\/?[O0]\s*FUEL\s+(\d{3,5})/);
+  return {
+    from: route[1], to: route[2], time: `${+trip[2]}:${trip[3]}`,
+    planTrip: +trip[1],
+    planTOW: get(/T\/?[O0]\s*WGT\s+(\d{5,6})/) || (bow && toFuel ? bow + payload + toFuel : 0),
+    payload, alt: get(/ALTERNATE\s+[A-Z0-9]{3,4}\s+(\d{1,5})/),
+  };
+}
+
+// Decide what a pasted or OCR'd document is.
+function readDocument(text) {
+  const plan = parsePlan(text);
+  if (plan) return { kind: 'plan', plan };
+  const legs = parseItinerary(text);
+  return legs.length ? { kind: 'itinerary', legs } : null;
+}
+
+// Airports match across documents whether or not they carry the K prefix
+// (the trip sheet says STL, the plan KSTL), and across the digit-for-letter
+// slips OCR makes in idents.
+function airportKey(id) {
+  const s = String(id).toUpperCase().trim().replace(/0/g, 'O').replace(/1/g, 'I').replace(/5/g, 'S').replace(/8/g, 'B');
+  return s.length === 4 && s[0] === 'K' ? s.slice(1) : s;
+}
+const sameLeg = (a, b) => airportKey(a.from) === airportKey(b.from) && airportKey(a.to) === airportKey(b.to);
+
+// Trip inputs in a compact form, for trip links and the recent-trips list.
+// Fields are positional: add new ones at the end only, so old links still load.
+const TRIP_LEG_KEYS = ['from', 'to', 'time', 'price', 'fee', 'waiver', 'feeAfter', 'planTrip', 'planTOW', 'payload', 'alt', 'limTO', 'limLdg'];
+const TRIP_AC_KEYS = ['bow', 'maxRamp', 'mtow', 'mlw', 'mzfw', 'capacity', 'density', 'taxi', 'cont', 'finalRes', 'minLanding'];
+
+function packTrip(t) {
+  return { v: 1, fob: t.fob, ac: TRIP_AC_KEYS.map(k => t.ac[k]), legs: t.legs.map(l => TRIP_LEG_KEYS.map(k => l[k] ?? '')) };
+}
+
+function unpackTrip(p) {
+  if (!p || p.v !== 1 || !Array.isArray(p.legs)) return null;
+  const pick = (keys, arr) => Object.fromEntries(keys.flatMap((k, i) => arr && arr[i] != null ? [[k, arr[i]]] : []));
+  return { fob: p.fob, ac: pick(TRIP_AC_KEYS, p.ac), legs: p.legs.map(a => pick(TRIP_LEG_KEYS, a)) };
+}
+
+// "STL-SDL-LGB-SDL-STL"
+const tripName = legs => legs.length ? [...legs.map(l => airportKey(l.from)), airportKey(legs[legs.length - 1].to)].join('-') : '';
+
+// Fold one document into the list of legs. An itinerary sets the legs and
+// their order, keeping what plans already filled in. A plan fills the leg with
+// the same airports; failing that, the one leg still without a plan that
+// shares an airport with it (OCR misread the other), taking the plan's idents;
+// failing that, it is added as a new leg.
+function mergeDocument(legs, doc) {
+  if (doc.kind === 'itinerary') {
+    return doc.legs.map(f => {
+      const old = legs.find(l => sameLeg(l, f));
+      return old ? (old.planTrip > 0 ? old : { ...old, time: f.time || old.time }) : { ...f };
+    });
+  }
+  const p = doc.plan;
+  let i = legs.findIndex(l => sameLeg(l, p));
+  if (i < 0) {
+    const loose = legs.flatMap((l, j) => !(l.planTrip > 0) &&
+      (airportKey(l.from) === airportKey(p.from) || airportKey(l.to) === airportKey(p.to)) ? [j] : []);
+    if (loose.length === 1) i = loose[0];
+  }
+  return i < 0 ? [...legs, { ...doc.plan }] : legs.map((l, j) => j === i ? { ...l, ...doc.plan } : l);
+}
+</script>
+
+<script>
+// Tesseract.js is the one outside file, fetched the first time an image is
+// read. Everything else works offline.
+const TESSERACT = 'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js';
+const EXAMPLE = {
+  fob: 5500,
+  fromExample: true,
+  legs: [
+    { from: 'KSTL', to: 'KPSP', time: '3:06', price: 6.51, fee: 0, waiver: 0, feeAfter: 0, planTrip: 10418, planTOW: 78069, payload: 1150, alt: 1294, limTO: 94600, limLdg: 76800 },
+    { from: 'KPSP', to: 'KSTL', time: '2:37', price: 8.09, fee: 700, waiver: 920, feeAfter: 0, planTrip: 8738, planTOW: 66869, payload: 1150, alt: 1000, limTO: 94600, limLdg: 76800 },
+  ],
+  airports: {},
+  bias: {},
+  ac: { bow: 51119, maxRamp: 95000, mtow: 94600, mlw: 76800, mzfw: 57440, capacity: 41500, density: 6.7,
+        taxi: 400, cont: 5, finalRes: 2500, minLanding: 5000 },
+};
+// What the pilot types, per departure airport. Remembered by airport.
+const MANUAL = [['price', 'Fuel price ($/gal)'], ['fee', 'Ramp fee ($)'], ['waiver', 'Fee cut at (gal)'], ['feeAfter', 'Reduced fee ($)']];
+// What the itinerary and flight plan fill in. Plan trip fuel and T/O weight
+// may be left blank, in which case trip fuel is estimated from flight time.
+const FROM_DOCS = [
+  ['from', 'From'], ['to', 'To'], ['time', 'Flight time (h:mm)'], ['planTrip', 'Plan trip fuel (lb)'], ['planTOW', 'Plan T/O weight (lb)'],
+  ['payload', 'Payload (lb)'], ['alt', 'Alternate fuel (lb)'],
+];
+const LIMITS = [['limTO', 'Limiting takeoff (lb)'], ['limLdg', 'Limiting landing (lb)']];
+const AC_FIELDS = [
+  ['minLanding', 'Minimum landing fuel (lb)'], ['bow', 'BOW (lb)'], ['maxRamp', 'Max ramp (lb)'], ['mtow', 'Max takeoff (lb)'], ['mlw', 'Max landing (lb)'],
+  ['mzfw', 'Max zero fuel (lb)'], ['capacity', 'Usable fuel (lb)'], ['density', 'Fuel density (lb/gal)'], ['taxi', 'Taxi fuel (lb)'],
+  ['cont', 'Contingency (% of trip)'], ['finalRes', 'Final reserve (lb)'],
+];
+const TEXT = new Set(['from', 'to', 'time']);
+const OPTIONAL = new Set(['planTrip', 'planTOW']);
+const BLANK_IS_ZERO = new Set(['feeAfter']);
+const PLAN_KEYS = new Set(['from', 'to', 'time', 'planTrip', 'planTOW']);
+const KEY = 'g600-tankering-v3';
+// Trip links open here. A link copied from a copy opened from disk still
+// points at the hosted page, which is how a trip moves from one to the other.
+const PAGES_URL = 'https://hodgesd.github.io/tankering-calc/';
+const TAIL = 'N75EM';
+const MAX_TRIPS = 20;
+const $ = id => document.getElementById(id);
+
+let state = structuredClone(EXAMPLE);
+try { const saved = JSON.parse(localStorage.getItem(KEY)); if (saved && saved.legs && saved.ac) state = saved; } catch {}
+state.airports ||= {};
+state.bias ||= {};
+state.trips ||= [];
+
+const num = v => Number(String(v ?? '').replace(/[,$\s]/g, ''));
+const int = n => Math.round(n).toLocaleString('en-US');
+const usd = n => n.toLocaleString('en-US', { style: 'currency', currency: 'USD' });
+
+// A new leg gets defaults for anything its documents did not supply, and the
+// last price, fee and waiver used at its departure airport.
+function withDefaults(leg) {
+  const known = state.airports[airportKey(leg.from)] || {};
+  return { from: '', to: '', time: '', planTrip: '', planTOW: '', payload: 1150, alt: 1000,
+           limTO: state.ac.mtow, limLdg: state.ac.mlw, price: '', fee: 0, waiver: 0, feeAfter: 0, ...known,
+           ...Object.fromEntries(Object.entries(leg).filter(([, v]) => v !== 0 && v !== '' && v != null)) };
+}
+
+function field(obj, key, label) {
+  const l = document.createElement('label');
+  l.textContent = label;
+  const i = document.createElement('input');
+  i.value = obj[key] ?? '';
+  if (!TEXT.has(key)) i.inputMode = 'decimal';
+  i.dataset.key = key;
+  i.addEventListener('input', () => {
+    obj[key] = i.value;
+    if (MANUAL.some(([k]) => k === key) && obj.from) {
+      const a = state.airports[airportKey(obj.from)] ||= {};
+      a[key] = i.value;
+    }
+    compute();
+  });
+  // Plan figures typed by hand teach the bias too, once the field is left.
+  if (PLAN_KEYS.has(key)) i.addEventListener('change', () => {
+    const plan = { from: obj.from, to: obj.to, time: obj.time, planTrip: num(obj.planTrip), planTOW: num(obj.planTOW) };
+    if (plan.from && plan.to) { state.bias = learnBias(state.bias, plan); compute(); }
+  });
+  l.append(i);
+  return l;
+}
+
+function grid(obj, fields, cls) {
+  const g = document.createElement('div');
+  g.className = 'grid' + (cls ? ' ' + cls : '');
+  g.append(...fields.map(([k, label]) => field(obj, k, label)));
+  return g;
+}
+
+function heading(text) { const h = document.createElement('h3'); h.textContent = text; return h; }
+
+function renderInputs() {
+  $('fob').value = state.fob;
+  $('legs').replaceChildren(...state.legs.map((leg, n) => {
+    const box = document.createElement('div');
+    box.className = 'panel';
+    const head = document.createElement('div');
+    head.className = 'leghead';
+    const title = document.createElement('span');
+    title.append(`Leg ${n + 1} `);
+    const note = document.createElement('span');
+    note.className = 'legnote';
+    title.append(note);
+    const rm = document.createElement('button');
+    rm.textContent = 'Remove';
+    rm.onclick = () => { state.legs.splice(n, 1); renderInputs(); compute(); };
+    head.append(title, rm);
+    const more = document.createElement('details');
+    const sum = document.createElement('summary');
+    sum.textContent = 'Limiting weights';
+    more.append(sum, grid(leg, LIMITS));
+    box.append(head, heading('You enter, for fuel bought at the departure airport. Buying the "fee cut at" gallons drops the ramp fee to the reduced fee: 0 if waived.'), grid(leg, MANUAL, 'manual'),
+               heading('From the itinerary and flight plan'), grid(leg, FROM_DOCS), more);
+    return box;
+  }));
+  const g = grid(state.ac, AC_FIELDS);
+  g.id = 'acgrid';
+  $('aircraft').replaceChildren(g);
+}
+
+// ---- Reading documents ----------------------------------------------------
+
+function loadScript(src) {
+  return new Promise((ok, fail) => {
+    const s = document.createElement('script');
+    s.src = src;
+    s.onload = ok;
+    s.onerror = () => { s.remove(); fail(new Error('could not load the OCR library (needs internet the first time)')); };
+    document.head.append(s);
+  });
+}
+
+let ocrWorker = null;
+function getWorker() {
+  ocrWorker ||= (async () => {
+    await loadScript(TESSERACT);
+    const w = await Tesseract.createWorker('eng');
+    // One uniform block keeps each flight plan row on one line.
+    await w.setParameters({ tessedit_pageseg_mode: '6' });
+    return w;
+  })().catch(e => { ocrWorker = null; throw e; });
+  return ocrWorker;
+}
+
+// Prepare a screenshot for OCR: enlarge small ones, make it black on white,
+// and erase table gridlines, which otherwise wreck the itinerary rows. A dark
+// run longer than a sixth of the height (or an eighth of the width) is a line,
+// not a letter.
+async function cleanImage(file) {
+  const bmp = await createImageBitmap(file);
+  const s = bmp.width < 1200 ? 2 : 1;
+  const w = bmp.width * s, h = bmp.height * s;
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  const g = c.getContext('2d');
+  g.imageSmoothingQuality = 'high';
+  g.drawImage(bmp, 0, 0, w, h);
+  const img = g.getImageData(0, 0, w, h), d = img.data;
+  const lum = new Float32Array(w * h);
+  let total = 0;
+  for (let i = 0; i < w * h; i++) total += lum[i] = 0.299 * d[4 * i] + 0.587 * d[4 * i + 1] + 0.114 * d[4 * i + 2];
+  const darkTheme = total / (w * h) < 128;
+  const dark = new Uint8Array(w * h);
+  for (let i = 0; i < w * h; i++) dark[i] = darkTheme ? lum[i] > 128 : lum[i] < 160;
+  const keep = dark.slice();
+  const vLine = Math.max(40, h / 6 | 0), hLine = Math.max(vLine, w / 8 | 0);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; ) {
+      if (!dark[y * w + x]) { x++; continue; }
+      const start = x;
+      while (x < w && dark[y * w + x]) x++;
+      if (x - start > hLine) keep.fill(0, y * w + start, y * w + x);
+    }
+  }
+  for (let x = 0; x < w; x++) {
+    for (let y = 0; y < h; ) {
+      if (!dark[y * w + x]) { y++; continue; }
+      const start = y;
+      while (y < h && dark[y * w + x]) y++;
+      if (y - start > vLine) for (let j = start; j < y; j++) keep[j * w + x] = 0;
+    }
+  }
+  for (let i = 0; i < w * h; i++) {
+    d[4 * i] = d[4 * i + 1] = d[4 * i + 2] = keep[i] ? 0 : 255;
+    d[4 * i + 3] = 255;
+  }
+  g.putImageData(img, 0, 0);
+  return c;
+}
+
+async function ocr(file) {
+  const worker = await getWorker();
+  const { data } = await worker.recognize(await cleanImage(file));
+  return data.text;
+}
+
+function describeDoc(doc) {
+  if (doc.kind === 'itinerary') {
+    return `Itinerary: ${doc.legs.map(l => `${l.from} to ${l.to} ${l.time || '(no ETE)'}`).join(', ')}`;
+  }
+  const p = doc.plan;
+  return `Flight plan ${p.from} to ${p.to}: trip fuel ${int(p.planTrip)} lb, ${p.time}` +
+    (p.planTOW ? `, T/O weight ${int(p.planTOW)} lb` : ', no T/O weight found') +
+    (p.payload ? `, payload ${int(p.payload)} lb` : '') + (p.alt ? `, alternate ${int(p.alt)} lb` : '');
+}
+
+function addSource(text, ok, raw) {
+  const li = document.createElement('li');
+  li.textContent = (ok ? '✓ ' : '✗ ') + text;
+  if (!ok) li.className = 'bad';
+  if (raw) {
+    const d = document.createElement('details');
+    const s = document.createElement('summary');
+    s.textContent = 'text read';
+    const pre = document.createElement('pre');
+    pre.textContent = raw;
+    d.append(s, pre);
+    li.append(d);
+  }
+  $('sources').append(li);
+  return li;
+}
+
+// The first drop after opening the page starts a new trip; later drops add to it.
+let newTrip = true;
+
+// Read a batch of dropped or pasted items: [{name, text}] or [{name, file}].
+// Itineraries are applied before plans so plans land on the right legs.
+async function readItems(items) {
+  if (newTrip || state.fromExample) { archive(); state.legs = []; state.fromExample = false; $('sources').replaceChildren(); }
+  newTrip = false;
+  const docs = [];
+  for (const [n, item] of items.entries()) {
+    let text = item.text;
+    if (item.file) {
+      const li = addSource(`Reading ${item.name} (${n + 1} of ${items.length})…`, true);
+      try { text = await ocr(item.file); } catch (e) { li.remove(); addSource(`${item.name}: ${e.message}`, false); continue; }
+      li.remove();
+    }
+    const doc = readDocument(text);
+    addSource(doc ? describeDoc(doc) : `${item.name}: no itinerary rows or flight plan found`, !!doc, text);
+    if (doc) docs.push(doc);
+  }
+  docs.sort((a, b) => (a.kind === 'plan') - (b.kind === 'plan'));
+  for (const doc of docs) if (doc.kind === 'plan') state.bias = learnBias(state.bias, doc.plan);
+  for (const doc of docs) state.legs = mergeDocument(state.legs, doc).map(withDefaults);
+  renderInputs(); compute();
+}
+
+async function readFiles(files) {
+  // Screenshots taken in order should be read in order.
+  const list = [...files].filter(f => f.type.startsWith('image/') || f.type.startsWith('text/'))
+    .sort((a, b) => a.lastModified - b.lastModified);
+  if (!list.length) return;
+  await readItems(await Promise.all(list.map(async f => f.type.startsWith('text/')
+    ? { name: f.name, text: await f.text() }
+    : { name: f.name || 'pasted image', file: f })));
+}
+
+// ---- Recent trips, links and summaries ------------------------------------
+
+let lastVerdict = '';   // verdict line of the trip on screen
+let lastPlan = null;    // its best plan, for the summary
+
+// File the trip on screen in the recent list before something replaces it.
+// The same inputs filed twice are one entry, moved to the top.
+function archive() {
+  if (state.fromExample || !state.legs.length) return;
+  const trip = packTrip(state), key = JSON.stringify(trip);
+  state.trips = [{ name: tripName(state.legs), saved: new Date().toISOString(), verdict: lastVerdict, trip },
+                 ...state.trips.filter(t => JSON.stringify(t.trip) !== key)].slice(0, MAX_TRIPS);
+}
+
+// Trips store inputs, not results, so a reloaded trip is costed afresh.
+function loadTrip(packed) {
+  const t = unpackTrip(packed);
+  if (!t) return false;
+  archive();
+  // Defaults fill only missing fields; remembered airport prices must not
+  // overwrite what the trip was costed with.
+  state.legs = t.legs.map(l => ({ ...withDefaults({}), ...l }));
+  if (t.fob != null) state.fob = t.fob;
+  state.ac = { ...state.ac, ...t.ac };
+  state.fromExample = false;
+  newTrip = true;
+  $('sources').replaceChildren();
+  renderInputs(); compute();
+  return true;
+}
+
+function renderRecent() {
+  const when = iso => new Date(iso).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+  const opts = [new Option(state.trips.length ? `Recent trips (${state.trips.length})` : 'No recent trips yet', '')];
+  state.trips.forEach((t, i) => opts.push(new Option(`${when(t.saved)} · ${t.name}${t.verdict ? ' · ' + t.verdict : ''}`, i)));
+  $('recent').replaceChildren(...opts);
+  $('recent').disabled = !state.trips.length;
+}
+
+const b64url = text => btoa(String.fromCharCode(...new TextEncoder().encode(text))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+const unb64url = code => new TextDecoder().decode(Uint8Array.from(atob(code.replace(/-/g, '+').replace(/_/g, '/')), c => c.charCodeAt(0)));
+
+// The trip rides after the #, which browsers never send to the server.
+function tripLink() {
+  const base = location.protocol.startsWith('http') ? location.origin + location.pathname : PAGES_URL;
+  return `${base}#t=${b64url(JSON.stringify(packTrip(state)))}`;
+}
+
+function summaryText() {
+  const { legs, best, minFuel } = lastPlan;
+  const money = n => '$' + n.toFixed(2);
+  return [
+    `${TAIL} ${tripName(legs)} · ${lastVerdict}`,
+    ...best.rows.map(r => `${r.leg.from} to ${r.leg.to}: ramp fuel ${int(r.ramp)} lb, ` +
+      (r.gal < 0.5 ? 'no fuel bought' : `buy ${int(r.gal)} gal at ${money(r.leg.price)}`) +
+      (r.fee ? `, ramp fee ${usd(r.fee)}` : '') + `, land with ${int(r.landing)} lb`),
+    `Total ${usd(best.total)}` + (minFuel.ok && minFuel.total - best.total > 0.005 ? `, against ${usd(minFuel.total)} buying minimum fuel at each stop` : ''),
+    tripLink(),
+  ].join('\n');
+}
+
+async function copyText(text, button) {
+  try { await navigator.clipboard.writeText(text); }
+  catch {
+    const t = document.createElement('textarea');
+    t.value = text; document.body.append(t); t.select(); document.execCommand('copy'); t.remove();
+  }
+  const label = button.textContent;
+  button.textContent = 'Copied';
+  setTimeout(() => { button.textContent = label; }, 1500);
+}
+
+// ---- Form to numbers, and results ----------------------------------------
+
+// Turn the text in the form into numbers; flag anything unusable.
+function parse() {
+  let bad = false;
+  const mark = (el, ok) => { el.classList.toggle('err', !ok); if (!ok) bad = true; };
+  const fob = num(state.fob);
+  mark($('fob'), state.fob !== '' && fob >= 0);
+  const ac = {};
+  for (const el of $('aircraft').querySelectorAll('input')) {
+    ac[el.dataset.key] = num(el.value);
+    mark(el, el.value !== '' && ac[el.dataset.key] >= 0);
+  }
+  ac.cont /= 100;
+  const legs = [...$('legs').children].map(box => {
+    const leg = {};
+    for (const el of box.querySelectorAll('input')) {
+      const k = el.dataset.key, v = el.value.trim();
+      leg[k] = TEXT.has(k) ? v.toUpperCase() : num(v);
+      if (k === 'time') { leg.hours = hoursOf(v); mark(el, leg.hours > 0); }
+      else if (TEXT.has(k)) mark(el, v !== '');
+      else if (OPTIONAL.has(k)) mark(el, v === '' || leg[k] > 0);
+      else if (BLANK_IS_ZERO.has(k)) mark(el, leg[k] >= 0);
+      else mark(el, v !== '' && leg[k] >= 0 && (k !== 'price' || leg[k] > 0));
+    }
+    leg.bias = biasFor(state.bias, leg.from, leg.to).factor;
+    return leg;
+  });
+  return bad ? null : { fob, ac, legs };
+}
+
+function table(el, head, rows) {
+  el.innerHTML = '';
+  const tr = el.insertRow();
+  for (const h of head) { const th = document.createElement('th'); th.textContent = h; tr.append(th); }
+  for (const r of rows) {
+    const row = el.insertRow();
+    if (r.cls) row.className = r.cls;
+    for (const c of r.cells) row.insertCell().textContent = c;
+  }
+}
+
+function describe(plan) {
+  return plan.rows.map(r => `${r.leg.from}: ramp fuel ${int(r.ramp)} lb (${r.gal < 0.5 ? 'no uplift' : `uplift ${int(r.gal)} gal`})`).join(' · ');
+}
+
+const pct = f => `${f >= 1 ? '+' : ''}${((f - 1) * 100).toFixed(1)}%`;
+function estimateNote(b) {
+  if (b.scope === 'route') return `trip fuel estimated, corrected ${pct(b.factor)} from ${b.n} plan${b.n > 1 ? 's' : ''} on this route`;
+  if (b.scope === 'all') return `trip fuel estimated, corrected ${pct(b.factor)} from the average of ${b.n} plans (none on this route yet)`;
+  return 'trip fuel estimated from flight time (no plans learned yet)';
+}
+
+// What has been learned from plans, per route.
+function renderLearned() {
+  const rows = Object.entries(state.bias).map(([route, list]) => ({
+    cells: [route.replace('-', ' to '), list.length, pct(list.reduce((a, s) => a + s.factor, 0) / list.length),
+            list.map(s => `${int(s.trip)} lb, ${Math.floor(s.hours)}:${String(Math.round(s.hours % 1 * 60)).padStart(2, '0')}`).join(' · ')] }));
+  $('learnedsum').textContent = `What it has learned (${rows.length} route${rows.length === 1 ? '' : 's'})`;
+  table($('learned'), ['Route', 'Plans', 'Correction', 'Plans used (trip fuel, time)'], rows);
+}
+
+function compute() {
+  renderLearned();
+  renderRecent();
+  lastVerdict = ''; lastPlan = null;
+  $('copysum').disabled = true;
+  try { localStorage.setItem(KEY, JSON.stringify(state)); } catch {}
+  [...$('legs').children].forEach((box, i) => {
+    const l = state.legs[i];
+    box.querySelector('.legnote').textContent = `${l.from || '?'} to ${l.to || '?'} · ` +
+      (num(l.planTrip) > 0 && num(l.planTOW) > 0 ? 'trip fuel from the flight plan' : estimateNote(biasFor(state.bias, l.from, l.to)));
+  });
+  const show = (verdict, detail, good) => {
+    $('verdict').textContent = verdict; $('verdict').className = good ? 'good' : ''; $('detail').textContent = detail;
+  };
+  $('warnings').innerHTML = ''; $('compare').innerHTML = ''; $('plan').innerHTML = '';
+  if (!state.legs.length) return show('Drop the itinerary and flight plans above, or add a leg.', '');
+  const input = parse();
+  if (!input) return show('Fill in the highlighted fields.', '');
+  const { fob, ac, legs } = input;
+  const res = optimize(legs, fob, ac);
+  if (res.error) return show('No legal fuel plan.', res.error);
+  const { best, minFuel, fullTanker } = res;
+  if (!best) return show('No legal fuel plan.', minFuel.why || 'Check the weights and fuel on board.');
+
+  const saving = minFuel.ok ? minFuel.total - best.total : 0;
+  if (saving > 0.005) show(`Tanker: saves ${usd(saving)}`, describe(best), true);
+  else show('Buy minimum fuel at each stop', describe(best));
+  lastVerdict = $('verdict').textContent;
+  lastPlan = { legs, best, minFuel };
+  $('copysum').disabled = false;
+
+  table($('plan'), ['Best plan', 'Ramp fuel', 'Trip fuel', 'Ldg fuel', 'Uplift gal', 'Uplift lb', 'T/O wt', 'Ldg wt', 'Fuel cost', 'Fee'],
+    best.rows.map(r => ({ cells: [`${r.leg.from} to ${r.leg.to}`, int(r.ramp), int(r.burn), int(r.landing), int(r.gal), int(r.lbs),
+                                  int(r.tow), int(r.ldw), usd(r.cost), usd(r.fee)] })));
+
+  const same = (a, b) => a.ok && b.ok && Math.abs(a.total - b.total) < 0.005 && Math.abs(a.lbsBought - b.lbsBought) < 1;
+  const line = (name, p) => p.ok
+    ? { cells: [name, usd(p.fuelCost), usd(p.fees), usd(p.total), minFuel.ok ? usd(minFuel.total - p.total) : ''], cls: same(p, best) ? 'best' : '' }
+    : { cells: [name, '', '', 'Not possible', p.why], cls: 'na' };
+  const rows = [line('Minimum fuel at each stop', minFuel)];
+  if (legs.length > 1) rows.push(line(`Tanker everything from ${legs[0].from}`, fullTanker));
+  if (!same(best, minFuel) && !same(best, fullTanker)) rows.push(line('Best mix', best));
+  table($('compare'), ['Option', 'Fuel', 'Ramp fees', 'Total', 'Saves'], rows);
+
+  const warn = [];
+  legs.forEach((l, i) => {
+    const next = legs[i + 1];
+    if (next && airportKey(l.to) !== airportKey(next.from)) warn.push(`Leg ${i + 1} ends at ${l.to} but leg ${i + 2} starts at ${next.from}. Check the airports or the leg order.`);
+    if (res.models[i].zfw > ac.mzfw) warn.push(`${l.from} to ${l.to}: zero fuel weight ${int(res.models[i].zfw)} lb is over the limit.`);
+    if (l.limTO > ac.mtow || l.limLdg > ac.mlw) warn.push(`${l.from} to ${l.to}: a limiting weight is above the structural limit.`);
+  });
+  $('warnings').replaceChildren(...warn.map(w => { const p = document.createElement('p'); p.className = 'warn'; p.textContent = w; return p; }));
+}
+
+// ---- Events ----------------------------------------------------------------
+
+const drop = $('drop');
+drop.onclick = () => $('files').click();
+drop.onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); $('files').click(); } };
+$('files').onchange = e => { readFiles(e.target.files); e.target.value = ''; };
+// The whole page takes drops, so a near miss does not open the image instead.
+document.addEventListener('dragover', e => { e.preventDefault(); drop.classList.add('over'); });
+document.addEventListener('dragleave', e => { if (!e.relatedTarget) drop.classList.remove('over'); });
+document.addEventListener('drop', e => {
+  e.preventDefault();
+  drop.classList.remove('over');
+  if (e.dataTransfer.files.length) readFiles(e.dataTransfer.files);
+  else { const text = e.dataTransfer.getData('text'); if (text) readItems([{ name: 'dropped text', text }]); }
+});
+// Paste anywhere except into a field: images are read by OCR, text as is.
+document.addEventListener('paste', e => {
+  if (e.target.closest && e.target.closest('input')) return;
+  const files = [...e.clipboardData.files];
+  const text = e.clipboardData.getData('text');
+  if (!files.length && !text) return;
+  e.preventDefault();
+  if (files.length) readFiles(files); else readItems([{ name: 'pasted text', text }]);
+});
+
+$('fob').addEventListener('input', () => { state.fob = $('fob').value; compute(); });
+$('add').onclick = () => {
+  const last = state.legs[state.legs.length - 1];
+  state.legs.push(withDefaults({ from: last ? last.to : '', payload: last && last.payload, limTO: last && last.limTO, limLdg: last && last.limLdg }));
+  state.fromExample = false;
+  renderInputs(); compute();
+};
+$('forget').onclick = () => { if (confirm('Forget every learned route correction?')) { state.bias = {}; compute(); } };
+$('clear').onclick = () => { archive(); state.legs = []; state.fromExample = false; $('sources').replaceChildren(); renderInputs(); compute(); };
+$('reset').onclick = () => {
+  archive();
+  state = { ...structuredClone(EXAMPLE), airports: state.airports, bias: state.bias, trips: state.trips, ac: state.ac };
+  $('sources').replaceChildren(); renderInputs(); compute();
+};
+$('recent').onchange = e => { const t = state.trips[e.target.value]; if (t) loadTrip(t.trip); };
+$('copylink').onclick = e => copyText(tripLink(), e.target);
+$('copysum').onclick = e => { if (lastPlan) copyText(summaryText(), e.target); };
+
+renderInputs();
+compute();
+// Opened from a trip link: load it (filing the trip that was on screen), then
+// drop the # so a reload does not load it over later edits.
+if (location.hash.startsWith('#t=')) {
+  let ok = false;
+  try { ok = loadTrip(JSON.parse(unb64url(location.hash.slice(3)))); } catch {}
+  if (!ok) addSource('This trip link could not be read.', false);
+  history.replaceState(null, '', location.pathname + location.search);
+}
+</script>
+</body>
+</html>
