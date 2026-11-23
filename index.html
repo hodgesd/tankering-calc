@@ -15,6 +15,7 @@
     --bad: var(--destructive, #c0392b);
     --warn: var(--warning, #b7791f);
     --r: var(--radius, 8px);
+    --pick: #eb6834;   /* the stop where the plan departs from buying the minimum */
   }
   body { font: 15px/1.45 var(--font-sans, system-ui, sans-serif); color: var(--fg); background: Canvas; margin: 0 auto; max-width: 980px; padding: 8px 16px; }
   h1 { font-size: 20px; margin: 8px 0 2px; }
@@ -44,9 +45,24 @@
   button { font: inherit; color: inherit; background: transparent; border: 1px solid var(--line); border-radius: 6px; padding: 5px 12px; cursor: pointer; }
   button:hover { background: var(--panel); }
   .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: end; margin-top: 12px; }
-  #verdict { font-size: 18px; font-weight: 600; margin: 0 0 4px; }
-  #verdict.good { color: var(--good); }
-  #detail { color: var(--dim); margin: 0; }
+  #verdict { font-size: 20px; line-height: 1.25; font-weight: 650; margin: 0 0 6px; }
+  #detail { margin: 0; color: var(--dim); }
+  #detail b { color: var(--good); font-size: 24px; font-weight: 700; margin-right: 6px; }
+  /* Route: a node per stop with the fuel to buy underneath. */
+  #route { display: grid; margin: 20px 0 4px; position: relative; }
+  #route::before { content: ""; position: absolute; top: 9px; height: 2px; background: var(--line); left: var(--edge); right: var(--edge); }
+  .node { text-align: center; position: relative; padding: 0 2px; }
+  .node .dot { width: 18px; height: 18px; border-radius: 50%; margin: 0 auto; background: Canvas; border: 2px solid var(--dim); }
+  .node.pick .dot { background: var(--pick); border-color: var(--pick); }
+  .node .ap { font-weight: 650; letter-spacing: .05em; margin-top: 6px; }
+  .node .gal { font-size: 13px; color: var(--dim); }
+  .node.pick .gal { color: var(--fg); font-weight: 650; }
+  .node .tag { display: inline-block; margin-top: 4px; font-size: 11px; font-weight: 600; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--pick); color: var(--pick); }
+  #reasons { list-style: none; padding: 0; margin: 16px 0 0; display: grid; gap: 8px; }
+  #reasons li { display: grid; grid-template-columns: 18px 1fr; gap: 6px; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--r); }
+  #reasons .i { font-weight: 700; text-align: center; color: var(--dim); }
+  #reasons .i.yes { color: var(--good); }
+  #reasons span.d { color: var(--dim); }
   .scroll { overflow-x: auto; }
   table { border-collapse: collapse; width: 100%; font-size: 13px; font-variant-numeric: tabular-nums; }
   th, td { text-align: right; padding: 6px 6px; border-bottom: 1px solid var(--line); white-space: nowrap; }
@@ -86,14 +102,19 @@
 <div class="panel">
   <p id="verdict"></p>
   <p id="detail"></p>
+  <div id="route" role="list" aria-label="Fuel to buy at each stop"></div>
+  <ul id="reasons"></ul>
   <div id="warnings"></div>
   <div class="row">
     <button id="copysum">Copy summary</button>
     <button id="copylink">Copy link</button>
   </div>
 </div>
-<div class="panel scroll"><table id="plan"></table></div>
-<div class="panel scroll"><table id="compare"></table></div>
+<details class="panel">
+  <summary>The numbers</summary>
+  <div class="scroll"><table id="plan"></table></div>
+  <div class="scroll" style="margin-top:12px"><table id="compare"></table></div>
+</details>
 
 <details class="panel">
   <summary id="learnedsum">What it has learned</summary>
@@ -269,9 +290,11 @@ function optimize(legs, fob0, ac) {
   if (stuck >= 0) return { error: `${legs[stuck].from} to ${legs[stuck].to} cannot carry its required fuel: over ${models[stuck].limitedBy}.` };
   const choices = legs.map(l => l.fee > 0 && l.waiver > 0 ? ['min', 'none', 'waiver', 'max'] : ['min', 'none', 'max']);
   let best = null;
+  const plans = [];   // every legal plan, for explainPlan's runner-ups
   const walk = (i, modes) => {
     if (i === legs.length) {
       const r = evaluate(legs, models, modes, fob0, ac);
+      if (r.ok) plans.push(r);
       if (r.ok && (!best || r.total < best.total - 0.005 ||
           (Math.abs(r.total - best.total) <= 0.005 && r.lbsBought < best.lbsBought - EPS))) best = r;
       return;
@@ -281,7 +304,113 @@ function optimize(legs, fob0, ac) {
   walk(0, []);
   const minFuel = evaluate(legs, models, legs.map(() => 'min'), fob0, ac);
   const fullTanker = evaluate(legs, models, legs.map((_, i) => i ? 'none' : 'min'), fob0, ac);
-  return { best, minFuel, fullTanker, models };
+  return { best, minFuel, fullTanker, models, plans };
+}
+
+// ---- Explaining the decision -----------------------------------------------
+// The decision in a headline and a few reasons, for the pilot and for whoever
+// the summary is shared with. The headline names only the stops where the best
+// plan buys more than the minimum. Each reason is a figure the optimizer
+// already costed: the minimum-fuel plan, or the cheapest plan that does the
+// obvious alternative (tanker from the first stop, buy to a fee threshold).
+const showId = id => /^K[A-Z]{3}$/.test(id) ? id.slice(1) : id;   // KSTL -> STL
+const grouped = n => String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+const dollars = n => '$' + grouped(n);
+const perGal = cents => cents < 100 ? `${cents}¢/gal` : `$${(cents / 100).toFixed(2)}/gal`;
+const list = a => a.length < 2 ? a.join('') : `${a.slice(0, -1).join(', ')} and ${a[a.length - 1]}`;
+
+function explainPlan(legs, res, ac) {
+  const { best, minFuel, plans, models } = res;
+  const rows = best.rows, min = minFuel.ok ? minFuel.rows : null;
+  const saving = minFuel.ok ? minFuel.total - best.total : 0;
+  const ap = i => showId(legs[i].from);
+  const cheapest = test => plans.filter(test).reduce((a, p) => !a || p.total < a.total ? p : a, null);
+  // Later stops where a plan buys less than the minimum-fuel plan: where its
+  // extra fuel went. The dearest of them is what carrying it avoided.
+  const reduced = (plan, i) => plan.rows.flatMap((r, j) => j > i && r.gal < min[j].gal - 0.5 ? [j] : []);
+  const dearest = js => js.reduce((a, j) => a < 0 || legs[j].price > legs[a].price ? j : a, -1);
+  // Each stop's own minimum: what its leg needs given the fuel actually on
+  // board on arrival. A stop buys extra when its ramp fuel is above that. It
+  // is a fee stop when the extra lowered the fee charged there; otherwise the
+  // fuel is being carried for later.
+  const arrive = i => rows[i].ramp - rows[i].lbs;
+  const ownMin = i => Math.max(arrive(i), models[i].minRamp);
+  const needGal = i => (ownMin(i) - arrive(i)) / ac.density;
+  const feeAt = (i, gal) => {
+    const L = legs[i];
+    if (!(L.fee > 0)) return 0;
+    return L.waiver > 0 && gal >= L.waiver - 1e-6 ? Math.min(L.feeAfter || 0, L.fee) : L.fee;
+  };
+  const extra = rows.flatMap((r, i) => r.ramp > ownMin(i) + 0.5 * ac.density ? [i] : []);
+  const feeCut = i => rows[i].fee < feeAt(i, needGal(i)) - 0.005;
+  const feeStops = extra.filter(feeCut), tankerStops = extra.filter(i => !feeCut(i));
+  const tag = i => !extra.includes(i) ? '' : feeCut(i) ? (rows[i].fee ? 'fee cut' : 'fee waived') : 'tanker';
+  const gals = is => list(is.map(i => grouped(rows[i].gal)));
+
+  // "Minimum" means only what the next leg needs given the fuel on board, as
+  // in ARINC's "Min Fuel" (see ownMin).
+  const head = [];
+  if (!extra.length) head.push('Buy minimum fuel at every stop.');
+  if (tankerStops.length) head.push(`Tanker from ${list(tankerStops.map(ap))}: buy ${gals(tankerStops)} gal there.`);
+  if (feeStops.length) {
+    head.push(tankerStops.length
+      ? `Top up at ${list(feeStops.map(ap))} to ${gals(feeStops)} gal.`
+      : `Buy minimum fuel at every stop except ${list(feeStops.map(ap))}. Top up there to ${gals(feeStops)} gal.`);
+  }
+
+  const yes = [], no = [];
+  const single = extra.length === 1;
+  for (const i of feeStops) {
+    const L = legs[i], need = needGal(i), x = rows[i].gal - need, full = feeAt(i, need), later = min ? reduced(best, i)[0] : undefined;
+    yes.push({ yes: true,
+      title: `${ap(i)} ${rows[i].fee ? `cuts its ${dollars(full)} ramp fee to ${dollars(rows[i].fee)}` : `waives its ${dollars(full)} ramp fee`} at ${grouped(L.waiver)} gal.`,
+      // Where the extra fuel goes, and its net cost, can only be pinned on this
+      // stop when it is the plan's only departure from minimum.
+      detail: single && min
+        ? `You need ${grouped(need)}. The extra ${grouped(x)} gal ` +
+          (later == null ? 'is still in the tanks at the end of the trip' : `lands at ${showId(L.to)} and replaces fuel you would buy ${later === i + 1 ? 'there' : `at ${ap(later)}`}`) +
+          `, so it costs about ${dollars(best.fuelCost - minFuel.fuelCost)}.`
+        : `You need ${grouped(need)}; buying ${grouped(x)} gal more ${rows[i].fee ? 'cuts' : 'waives'} the fee.` });
+  }
+  for (const i of tankerStops) {
+    const k = min ? dearest(reduced(best, i)) : -1, cents = k >= 0 ? Math.round((legs[k].price - legs[i].price) * 100) : 0;
+    yes.push({ yes: true,
+      title: cents > 0 ? `${ap(i)} fuel is ${perGal(cents)} cheaper than ${ap(k)}.` : `Carrying fuel from ${ap(i)} lowers the trip cost.`,
+      detail: single ? `Buying only the minimum everywhere costs ${dollars(saving)} more.` : '' });
+  }
+  // The obvious alternatives, and how much more each costs for the trip.
+  if (min && legs.length > 1 && !extra.includes(0)) {
+    const alt = cheapest(p => p.rows[0].gal > min[0].gal + 0.5 && reduced(p, 0).length > 0);
+    if (alt) {
+      const d = alt.total - best.total, k = dearest(reduced(alt, 0)), cents = Math.round((legs[k].price - legs[0].price) * 100);
+      no.push({ d, yes: false,
+        title: `Tankering from ${ap(0)} ${d < 50 ? 'is a wash' : "doesn't pay"}.`,
+        detail: (cents > 0 ? `${ap(0)} fuel is ${perGal(cents)} cheaper than ${ap(k)}, but ` : cents < 0 ? `${ap(0)} fuel is ${perGal(-cents)} dearer than ${ap(k)}, and ` : '') +
+          `the best plan that carries it costs ${dollars(d)} more.` });
+    }
+  }
+  legs.forEach((L, i) => {
+    if (!(rows[i].fee > 0 && L.waiver > 0)) return;
+    const alt = cheapest(p => p.rows[i].fee < rows[i].fee - 0.005);
+    if (!alt) return;
+    const d = alt.total - best.total;
+    no.push({ d, yes: false,
+      title: `${ap(i)}'s ${dollars(rows[i].fee)} ramp fee is paid.`,
+      detail: `Buying ${grouped(L.waiver)} gal to ${alt.rows[i].fee ? `cut it to ${dollars(alt.rows[i].fee)}` : 'waive it'} costs ${dollars(d)} more than it saves.` });
+  });
+  // At most three reasons: why the plan does what it does, then the closest
+  // alternatives it beat.
+  no.sort((a, b) => a.d - b.d);
+  const reasons = [...yes, ...no].slice(0, 3).map(({ yes, title, detail }) => ({ yes, title, detail }));
+
+  return {
+    headline: head.join(' '),
+    saving,
+    stops: rows.map((r, i) => ({ id: ap(i), gal: r.gal, tag: tag(i) })),
+    end: showId(legs[legs.length - 1].to),
+    home: airportKey(legs[legs.length - 1].to) === airportKey(legs[0].from),
+    reasons,
+  };
 }
 
 // Pull legs out of trip-sheet text, typed, copied or read by OCR. Each leg is
@@ -706,15 +835,15 @@ function tripLink() {
   return `${base}#t=${b64url(JSON.stringify(packTrip(state)))}`;
 }
 
+// The same decision as text: headline, saving, what to buy, why.
 function summaryText() {
-  const { legs, best, minFuel } = lastPlan;
-  const money = n => '$' + n.toFixed(2);
+  const { legs, why } = lastPlan;
   return [
-    `${TAIL} ${tripName(legs)} · ${lastVerdict}`,
-    ...best.rows.map(r => `${r.leg.from} to ${r.leg.to}: ramp fuel ${int(r.ramp)} lb, ` +
-      (r.gal < 0.5 ? 'no fuel bought' : `buy ${int(r.gal)} gal at ${money(r.leg.price)}`) +
-      (r.fee ? `, ramp fee ${usd(r.fee)}` : '') + `, land with ${int(r.landing)} lb`),
-    `Total ${usd(best.total)}` + (minFuel.ok && minFuel.total - best.total > 0.005 ? `, against ${usd(minFuel.total)} buying minimum fuel at each stop` : ''),
+    `${TAIL} ${tripName(legs)}`,
+    why.headline,
+    why.saving > 0.005 ? `Saves ${usd(why.saving)} against buying the minimum everywhere.` : 'Nothing beats buying the minimum at each stop.',
+    'Buy: ' + why.stops.map(s => `${s.id} ${s.gal < 0.5 ? 'none' : int(s.gal) + ' gal'}${s.tag ? ` (${s.tag})` : ''}`).join(' · '),
+    ...why.reasons.map(r => `${r.yes ? '✓' : '–'} ${r.title} ${r.detail}`),
     tripLink(),
   ].join('\n');
 }
@@ -772,8 +901,37 @@ function table(el, head, rows) {
   }
 }
 
-function describe(plan) {
-  return plan.rows.map(r => `${r.leg.from}: ramp fuel ${int(r.ramp)} lb (${r.gal < 0.5 ? 'no uplift' : `uplift ${int(r.gal)} gal`})`).join(' · ');
+// The decision, the route with fuel to buy, and the reasons (see explainPlan).
+function renderDecision(why) {
+  $('verdict').textContent = why.headline;
+  if (why.saving > 0.005) {
+    const b = document.createElement('b');
+    b.textContent = `Saves ${usd(why.saving)}`;
+    $('detail').replaceChildren(b, 'against buying the minimum everywhere');
+  } else $('detail').textContent = 'Nothing beats buying the minimum at each stop.';
+  const node = (id, gal, tag) => {
+    const n = document.createElement('div');
+    n.className = 'node' + (tag ? ' pick' : '');
+    n.setAttribute('role', 'listitem');
+    n.innerHTML = '<div class="dot"></div><div class="ap"></div><div class="gal"></div>';
+    n.querySelector('.ap').textContent = id;
+    n.querySelector('.gal').textContent = gal;
+    if (tag) { const t = document.createElement('span'); t.className = 'tag'; t.textContent = tag; n.append(t); }
+    return n;
+  };
+  const nodes = [...why.stops.map(s => node(s.id, s.gal < 0.5 ? 'none' : `${int(s.gal)} gal`, s.tag)), node(why.end, why.home ? 'home' : 'arrive', '')];
+  $('route').style.gridTemplateColumns = `repeat(${nodes.length}, 1fr)`;
+  $('route').style.setProperty('--edge', `${50 / nodes.length}%`);
+  $('route').replaceChildren(...nodes);
+  $('reasons').replaceChildren(...why.reasons.map(r => {
+    const li = document.createElement('li');
+    li.innerHTML = '<span class="i" aria-hidden="true"></span><div><b></b> <span class="d"></span></div>';
+    li.querySelector('.i').textContent = r.yes ? '✓' : '–';
+    li.querySelector('.i').classList.toggle('yes', r.yes);
+    li.querySelector('b').textContent = r.title;
+    li.querySelector('.d').textContent = r.detail;
+    return li;
+  }));
 }
 
 const pct = f => `${f >= 1 ? '+' : ''}${((f - 1) * 100).toFixed(1)}%`;
@@ -803,9 +961,10 @@ function compute() {
     box.querySelector('.legnote').textContent = `${l.from || '?'} to ${l.to || '?'} · ` +
       (num(l.planTrip) > 0 && num(l.planTOW) > 0 ? 'trip fuel from the flight plan' : estimateNote(biasFor(state.bias, l.from, l.to)));
   });
-  const show = (verdict, detail, good) => {
-    $('verdict').textContent = verdict; $('verdict').className = good ? 'good' : ''; $('detail').textContent = detail;
+  const show = (verdict, detail) => {
+    $('verdict').textContent = verdict; $('detail').textContent = detail;
   };
+  $('route').replaceChildren(); $('reasons').replaceChildren();
   $('warnings').innerHTML = ''; $('compare').innerHTML = ''; $('plan').innerHTML = '';
   if (!state.legs.length) return show('Drop the itinerary and flight plans above, or add a leg.', '');
   const input = parse();
@@ -816,14 +975,10 @@ function compute() {
   const { best, minFuel, fullTanker } = res;
   if (!best) return show('No legal fuel plan.', minFuel.why || 'Check the weights and fuel on board.');
 
-  const saving = minFuel.ok ? minFuel.total - best.total : 0;
-  // "Tanker" only when fuel is carried past a stop. Buying fee-cut gallons on
-  // the last leg can save money too, but that is not tankering.
-  const carried = best.rows.slice(0, -1).some((r, i) => r.landing > minFuel.rows[i].landing + 1);
-  if (saving > 0.005) show(`${carried ? 'Tanker' : 'Best plan'}: saves ${usd(saving)}`, describe(best), true);
-  else show('Buy minimum fuel at each stop', describe(best));
-  lastVerdict = $('verdict').textContent;
-  lastPlan = { legs, best, minFuel };
+  const why = explainPlan(legs, res, ac);
+  renderDecision(why);
+  lastVerdict = why.saving > 0.005 ? `Saves ${usd(why.saving)}` : 'Minimum fuel';
+  lastPlan = { legs, why };
   $('copysum').disabled = false;
 
   table($('plan'), ['Best plan', 'Ramp fuel', 'Trip fuel', 'Ldg fuel', 'Uplift gal', 'Uplift lb', 'T/O wt', 'Ldg wt', 'Fuel cost', 'Fee'],
