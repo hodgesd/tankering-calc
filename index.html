@@ -57,6 +57,7 @@
   .node .ap { font-weight: 650; letter-spacing: .05em; margin-top: 6px; }
   .node .gal { font-size: 13px; color: var(--dim); }
   .node.pick .gal { color: var(--fg); font-weight: 650; }
+  .node .lb { font-size: 12px; color: var(--dim); }
   .node .tag { display: inline-block; margin-top: 4px; font-size: 11px; font-weight: 600; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--pick); color: var(--pick); }
   #reasons { list-style: none; padding: 0; margin: 16px 0 0; display: grid; gap: 8px; }
   #reasons li { display: grid; grid-template-columns: 18px 1fr; gap: 6px; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--r); }
@@ -131,7 +132,7 @@
 </details>
 
 <script id="core">
-// Tankering maths and document parsing. No DOM access here, so test.js can
+// Tankering math and document parsing. No DOM access here, so test.js can
 // run it under jsc.
 //
 // Trip fuel for a leg comes from its flight plan when one was read: the plan's
@@ -385,7 +386,7 @@ function explainPlan(legs, res, ac) {
       const d = alt.total - best.total, k = dearest(reduced(alt, 0)), cents = Math.round((legs[k].price - legs[0].price) * 100);
       no.push({ d, yes: false,
         title: `Tankering from ${ap(0)} ${d < 50 ? 'is a wash' : "doesn't pay"}.`,
-        detail: (cents > 0 ? `${ap(0)} fuel is ${perGal(cents)} cheaper than ${ap(k)}, but ` : cents < 0 ? `${ap(0)} fuel is ${perGal(-cents)} dearer than ${ap(k)}, and ` : '') +
+        detail: (cents > 0 ? `${ap(0)} fuel is ${perGal(cents)} cheaper than ${ap(k)}, but ` : cents < 0 ? `${ap(0)} fuel is ${perGal(-cents)} more expensive than ${ap(k)}, and ` : '') +
           `the best plan that carries it costs ${dollars(d)} more.` });
     }
   }
@@ -406,7 +407,10 @@ function explainPlan(legs, res, ac) {
   return {
     headline: head.join(' '),
     saving,
-    stops: rows.map((r, i) => ({ id: ap(i), gal: r.gal, tag: tag(i) })),
+    // `ramp` is the fuel to load to, which still holds when the aircraft lands
+    // with more or less than planned. `feeGal` is the purchase a stop must
+    // still reach when the plan cuts its fee, even if its minimum already does.
+    stops: rows.map((r, i) => ({ id: ap(i), gal: r.gal, ramp: r.ramp, tag: tag(i), feeGal: r.fee < legs[i].fee - 0.005 ? legs[i].waiver : 0 })),
     end: showId(legs[legs.length - 1].to),
     home: airportKey(legs[legs.length - 1].to) === airportKey(legs[0].from),
     reasons,
@@ -558,6 +562,8 @@ const KEY = 'g600-tankering-v3';
 const PAGES_URL = 'https://tanker.hdgs.me/';
 const TAIL = 'N75EM';
 const MAX_TRIPS = 20;
+// A remembered fuel price older than this many days raises a warning.
+const PRICE_STALE_DAYS = 7;
 const $ = id => document.getElementById(id);
 
 let state = structuredClone(EXAMPLE);
@@ -573,7 +579,7 @@ const usd = n => n.toLocaleString('en-US', { style: 'currency', currency: 'USD' 
 // A new leg gets defaults for anything its documents did not supply, and the
 // last price, fee and waiver used at its departure airport.
 function withDefaults(leg) {
-  const known = state.airports[airportKey(leg.from)] || {};
+  const { priceDate, ...known } = state.airports[airportKey(leg.from)] || {};
   return { from: '', to: '', time: '', planTrip: '', planTOW: '', payload: 1150, alt: 1000,
            limTO: state.ac.mtow, limLdg: state.ac.mlw, price: '', fee: 0, waiver: 0, feeAfter: 0, ...known,
            ...Object.fromEntries(Object.entries(leg).filter(([, v]) => v !== '' && v != null)) };
@@ -591,6 +597,8 @@ function field(obj, key, label) {
     if (MANUAL.some(([k]) => k === key) && obj.from) {
       const a = state.airports[airportKey(obj.from)] ||= {};
       a[key] = i.value;
+      // Dated so an old remembered price is flagged (see PRICE_STALE_DAYS).
+      if (key === 'price') a.priceDate = new Date().toISOString();
     }
     compute();
   });
@@ -842,7 +850,10 @@ function summaryText() {
     `${TAIL} ${tripName(legs)}`,
     why.headline,
     why.saving > 0.005 ? `Saves ${usd(why.saving)} against buying the minimum everywhere.` : 'Nothing beats buying the minimum at each stop.',
-    'Buy: ' + why.stops.map(s => `${s.id} ${s.gal < 0.5 ? 'none' : int(s.gal) + ' gal'}${s.tag ? ` (${s.tag})` : ''}`).join(' · '),
+    'Buy: ' + why.stops.map(s => {
+      const note = [s.tag, s.feeGal ? `buy at least ${int(s.feeGal)} gal to cut the fee` : ''].filter(Boolean).join(': ');
+      return `${s.id} ${s.gal < 0.5 ? 'none' : int(s.gal) + ' gal'}, fuel to ${int(s.ramp)} lb${note ? ` (${note})` : ''}`;
+    }).join(' · '),
     ...why.reasons.map(r => `${r.yes ? '✓' : '–'} ${r.title} ${r.detail}`),
     tripLink(),
   ].join('\n');
@@ -909,17 +920,19 @@ function renderDecision(why) {
     b.textContent = `Saves ${usd(why.saving)}`;
     $('detail').replaceChildren(b, 'against buying the minimum everywhere');
   } else $('detail').textContent = 'Nothing beats buying the minimum at each stop.';
-  const node = (id, gal, tag) => {
+  const node = (id, gal, tag, lb) => {
     const n = document.createElement('div');
     n.className = 'node' + (tag ? ' pick' : '');
     n.setAttribute('role', 'listitem');
-    n.innerHTML = '<div class="dot"></div><div class="ap"></div><div class="gal"></div>';
+    n.innerHTML = '<div class="dot"></div><div class="ap"></div><div class="gal"></div><div class="lb"></div>';
     n.querySelector('.ap').textContent = id;
     n.querySelector('.gal').textContent = gal;
+    n.querySelector('.lb').textContent = lb;
     if (tag) { const t = document.createElement('span'); t.className = 'tag'; t.textContent = tag; n.append(t); }
     return n;
   };
-  const nodes = [...why.stops.map(s => node(s.id, s.gal < 0.5 ? 'none' : `${int(s.gal)} gal`, s.tag)), node(why.end, why.home ? 'home' : 'arrive', '')];
+  const nodes = [...why.stops.map(s => node(s.id, s.gal < 0.5 ? 'none' : `${int(s.gal)} gal`, s.tag, `to ${int(s.ramp)} lb`)),
+                 node(why.end, why.home ? 'home' : 'arrive', '', '')];
   $('route').style.gridTemplateColumns = `repeat(${nodes.length}, 1fr)`;
   $('route').style.setProperty('--edge', `${50 / nodes.length}%`);
   $('route').replaceChildren(...nodes);
@@ -994,8 +1007,15 @@ function compute() {
   if (!same(best, minFuel) && !same(best, fullTanker)) rows.push(line('Best mix', best));
   table($('compare'), ['Option', 'Fuel', 'Ramp fees', 'Total', 'Saves'], rows);
 
-  const warn = [];
+  const warn = [], dated = new Set();
   legs.forEach((l, i) => {
+    // Only when the leg still uses the remembered price, once per airport.
+    const key = airportKey(l.from), memo = state.airports[key];
+    const age = memo && memo.priceDate && num(memo.price) === l.price ? (Date.now() - Date.parse(memo.priceDate)) / 864e5 : 0;
+    if (age > PRICE_STALE_DAYS && !dated.has(key)) {
+      dated.add(key);
+      warn.push(`${l.from} fuel price was entered ${new Date(memo.priceDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}, ${Math.floor(age)} days ago. Check it is current.`);
+    }
     const next = legs[i + 1];
     if (next && airportKey(l.to) !== airportKey(next.from)) warn.push(`Leg ${i + 1} ends at ${l.to} but leg ${i + 2} starts at ${next.from}. Check the airports or the leg order.`);
     if (res.models[i].zfw > ac.mzfw) warn.push(`${l.from} to ${l.to}: zero fuel weight ${int(res.models[i].zfw)} lb is over the limit.`);
